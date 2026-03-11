@@ -320,6 +320,47 @@ class WhisperManager {
     return text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
   }
 
+  annotateProsody(segments) {
+    const PAUSE_THRESHOLD = 0.5;      // gap in seconds between words → [pause]
+    const LONG_PAUSE_THRESHOLD = 1.5; // gap in seconds → [long pause]
+    const FAST_WPM = 200;             // words/min above this → [fast] wrapper
+    const SLOW_WPM = 80;              // words/min below this → [slow] wrapper
+
+    const parts = [];
+
+    for (const segment of segments) {
+      if (!segment.words || segment.words.length === 0) {
+        parts.push(segment.text.trim());
+        continue;
+      }
+
+      const duration = segment.end - segment.start;
+      const wpm = duration > 0 ? (segment.words.length / duration) * 60 : 150;
+      const isFast = wpm > FAST_WPM;
+      const isSlow = wpm < SLOW_WPM;
+
+      if (isFast) parts.push(" [fast]");
+      else if (isSlow) parts.push(" [slow]");
+
+      let prevEnd = segment.start;
+      for (const wordObj of segment.words) {
+        const gap = wordObj.start - prevEnd;
+        if (gap > LONG_PAUSE_THRESHOLD) {
+          parts.push(" [long pause]");
+        } else if (gap > PAUSE_THRESHOLD) {
+          parts.push(" [pause]");
+        }
+        parts.push(wordObj.word);
+        prevEnd = wordObj.end;
+      }
+
+      if (isFast) parts.push(" [/fast]");
+      else if (isSlow) parts.push(" [/slow]");
+    }
+
+    return this.normalizeWhitespace(parts.join(""));
+  }
+
   parseWhisperResult(output) {
     // Handle both string (from CLI) and object (from server) inputs
     let result;
@@ -353,6 +394,17 @@ class WhisperManager {
 
     // Handle whisper-server format (has "text" field directly)
     if (result.text !== undefined) {
+      // Use prosody annotation if word-level timestamps are available (verbose_json format)
+      if (result.segments && Array.isArray(result.segments)) {
+        const hasWordTimestamps = result.segments.some((s) => s.words && s.words.length > 0);
+        if (hasWordTimestamps) {
+          const annotated = this.annotateProsody(result.segments);
+          if (annotated && !this.isBlankAudioMarker(annotated)) {
+            return { success: true, text: annotated };
+          }
+        }
+      }
+
       const text = typeof result.text === "string" ? this.normalizeWhitespace(result.text) : "";
       if (!text || this.isBlankAudioMarker(text)) {
         return { success: false, message: "No audio detected" };
